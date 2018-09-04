@@ -1,0 +1,700 @@
+
+#include <asf.h>
+
+
+void clockSetup(void);
+void wait(volatile int d);
+void portSetup(void);
+void convert(int t);
+void countKey(char *a);
+void arithmetic(int c1, int c2, int op, int *p);
+void display(char *d);	//displays read #'s on SSDs
+void poll(void);
+//void EICsetup(void);
+
+//volatile int counter=0;
+//volatile int k=0;	//counter for read array
+//volatile int m=0;	//counter for displaying
+volatile char array1[4] ="0000";
+volatile char *arrPtr;
+
+int main (void){
+	
+	system_init();
+ 	clockSetup();
+	portSetup();
+	//	EICsetup();
+
+	while(1){	
+		
+		poll();
+		wait(10);
+	}
+}
+
+void clockSetup(void){
+//setting up the clock source
+
+	/* Various bits in the INTFLAG register can be set to one at startup.
+		This will ensure that these bits are cleared */
+	SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET | SYSCTRL_INTFLAG_DFLLRDY;
+	SYSCTRL->OSC8M.bit.PRESC = 3;	//divide the clock by 8	so 1MHz still
+	SYSCTRL->OSC8M.bit.ONDEMAND = 1;	//clock is off is no peripheral request
+	SYSCTRL->OSC8M.bit.RUNSTDBY = 0;	//clock is off in sleep mode
+	SYSCTRL->OSC8M.reg |= 1<<1;	//enable clock
+	//SYSCTRL->OSC8M.bit.FRANGE = 2;	//yet another way to control manipulate the clock freq	
+	
+	//SYSCTRL->OSC32K.bit.STARTUP = 0;	//start up asap
+	//SYSCTRL->OSC32K.bit.ONDEMAND = 1;	//clock is off if no peripheral request
+	//SYSCTRL->OSC32K.bit.RUNSTDBY = 1;	//clock is on in sleep mode
+	//SYSCTRL->OSC32K.bit.EN32K = 1;	//enable output
+	//SYSCTRL->OSC32K.reg |= 1<<1;	//enable clock
+	//
+	
+//setting up the clock generator
+
+	GCLK->CTRL.bit.SWRST = 1;	//reset the generators
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for the reset to complete  
+		
+	//this section sets up division for chosen Genclk
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(0) | GCLK_GENDIV_DIV(1);
+
+	//this section enables chosen Genclk and configures it
+
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC8M | GCLK_GENCTRL_RUNSTDBY;
+	
+	//this section chooses what Genclk goes to what peripheral
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for sync to complete  
+	GCLK->CLKCTRL.reg |= 0<<14;	//disable clock
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_EIC | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for EIC...this is a single write method i believe
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOM4_CORE | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for sercom4
+	while (GCLK->STATUS.bit.SYNCBUSY==1){}	//waiting for sync to complete  
+		
+// setting up the CPU and APB and AHB buses clocks
+	PM->CPUSEL.bit.CPUDIV = 0;	//divide CPU clock by 1
+	PM->APBASEL.bit.APBADIV = 0;	//divide apba bus by 64
+	PM->APBBSEL.bit.APBBDIV = 0;	//divide apbb bus by 64 (2^n)
+	PM->APBCSEL.bit.APBCDIV = 0;	//divide apbc bus by 64
+	PM->APBAMASK.reg = PM_APBAMASK_EIC | PM_APBAMASK_GCLK | PM_APBAMASK_PM | PM_APBAMASK_SYSCTRL;	//enable apb's
+	PM->APBCMASK.reg = PM_APBCMASK_TC4 | PM_APBCMASK_SERCOM4 | PM_APBCMASK_ADC | PM_APBCMASK_SERCOM1;	//enable apb's
+
+}
+
+void portSetup(void){
+	Port *por = PORT;
+	PortGroup *porA = &(por->Group[0]);
+	PortGroup *porB = &(por->Group[1]);
+	porA -> DIRSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;//outputs
+	porB -> DIRSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//LED segments
+	porA -> DIRCLR.reg = PORT_PA16 | PORT_PA17 | PORT_PA18 | PORT_PA19;//inputs keypad
+	porA -> PINCFG[16].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[17].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[18].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> OUTCLR.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;
+
+	//PortGroup *porA = &(por->Group[0]);
+	//porA->DIRCLR.reg = 1<<4;	//setting up PB06 as input
+	//porA->PMUX[3].bit.PMUXE = 0;	//mux the EIC to pin PA06 (6=2*n)	EXTINT[6]
+	//porA->PINCFG[6].bit.PMUXEN =1;	//enable the MUX
+	//porA->PINCFG[6].bit.INEN =1;	//allows us to setup input and see it (not needed for EIC)
+	//porA->PINCFG[6].bit.PULLEN =1;	//allows us to pull on pin,  we need INEN to do this
+	//porA->OUT.reg |= 0<<6;	//needed to make oull down
+	
+}
+
+void poll(void){
+	Port *por = PORT;
+	PortGroup *porA = &(por->Group[0]);
+	PortGroup *porB = &(por->Group[1]);
+	
+	volatile int equal=0;//send key
+	volatile int i=0;//counter
+	volatile int x=0; //state (state machine)
+	volatile  int CNT=0;  //counter (state machine)
+	volatile  char T1;	//(state machine)
+	volatile  int N=1;	//delay (state machine)
+	volatile char key='9';//NULL char key (state machine)
+	volatile char array[10];//write array
+	volatile char *keyptr;//write array pointer
+	volatile int counter=0;
+
+	keyptr = array;
+
+	while(1){
+		key='#';
+		///////////check first row////////////////
+		porA -> OUTCLR.reg = PORT_PA07;//turn on left SSD/top row of keypad
+		porA -> OUTSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06;//turn off other SSD/top row of keypad
+		display(arrPtr);
+
+		
+		if(porA->IN.reg&PORT_PA19){//checking PA19 for input
+			key='1';
+		}
+		if(porA->IN.reg&PORT_PA18){//checking PA18 for input
+			key='2';
+		}
+		if(porA->IN.reg&PORT_PA17){//checking PA17 for input
+			key='3';
+		}
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'A'
+		{
+			key='+';
+		}
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA07;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+		////////////check second row////////////////
+		porA -> OUTCLR.reg = PORT_PA06;//turn on left SSD/top row of keypad
+		display((arrPtr+1));
+
+
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input
+		key='4';
+		
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input
+		key='5';
+		
+		if(porA->IN.reg&PORT_PA17)//checking PA17 for input
+		key='6';
+		
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'B'
+		{
+			key='-';
+		}
+		
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA06;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+
+		////////////check third row////////////////
+		porA -> OUTCLR.reg = PORT_PA05;//turn on left SSD/top row of keypad
+		display((arrPtr+2));
+
+
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input
+		key='7';
+		
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input
+		key='8';
+		
+		if(porA->IN.reg&PORT_PA17)//checking PA17 for input
+		key='9';
+		
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'C'
+		{
+			key='x';
+		}
+		
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA05;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+
+		////////////check fourth row////////////////
+		porA -> OUTCLR.reg = PORT_PA04;//turn on left SSD/top row of keypad
+		display((arrPtr+3));
+
+		if(porA->IN.reg&PORT_PA16){//checking PA16 for input 'D'
+				key='/';
+		}
+		if(porA->IN.reg&PORT_PA17){//checking PA17 for input 'D'
+				key='#';
+		}
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input '0'
+		key='0';
+		
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input '*'
+		{
+			key= '=';
+			equal = 1;
+		}
+		
+		
+
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA04;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+		
+		switch(x){			
+			case 0:				//state 0 checks for key pressed
+			if(key=='#'){
+			break;}
+			T1=key;
+			CNT=0;
+			x=1;
+			break;
+			
+			case 1:				//state 1 denouncing initial press
+			if(key!=T1){
+				x=0;
+			break;}
+			CNT++;
+			if(CNT>N){	//pressed long enough
+				x=2;
+			break;}
+			break;
+			
+			case 2:				//state 2 process input
+			if(key!='#'){
+				CNT=0;
+				if(key!='a'){
+					array[i++]=key;
+					//if (counter<4){
+					//counter++;}
+					//if(i>=4){
+						//i=0;
+					//}
+				}
+			}
+			CNT=0;
+			x=3;
+			break;
+			
+			case 3:				//state 3 denouncing release
+			if(key == '#'){
+				CNT++;
+				if(CNT>N){	//released long enough then reset
+					CNT=0;
+					x=0;
+					if (equal){
+						equal=0;
+						i = 0;
+						countKey(keyptr);
+					}
+				}
+				break;
+			}
+			CNT = 0;
+			break;
+			
+			default:
+			x=0;
+			break;
+		}
+	}
+}
+
+
+
+void countKey(char *a){	
+	volatile int storeArray[10]; 
+	volatile int *ptr;
+	ptr = storeArray;
+	volatile int i = 0;
+	volatile int operator = 0;
+	volatile int count1 = 0;	//# of digits of first value
+	volatile int count2 = 0;	//# of digits of second value
+	while(i < 10){
+		switch(*a){
+			case'0':
+				 storeArray[i] = 0;
+				a++;
+				i++;
+			break;
+			
+			case'1': 
+				storeArray[i] = 1;
+				a++;
+				i++;
+			break;
+			
+			case'2': 
+				storeArray[i] = 2;
+				a++;
+				i++;
+			break;
+			
+			case'3': 
+				storeArray[i] = 3;
+				a++;
+				i++;
+			break;
+			
+			case'4':
+				 storeArray[i] = 4;
+				a++;
+				i++;
+			break;
+			
+			case'5': 
+				storeArray[i] = 5;
+				a++;
+				i++;
+			break;
+			
+			case'6':
+				 storeArray[i] = 6;
+				a++;
+				i++;
+			break;
+			
+			case'7': 
+				storeArray[i] = 7;
+				a++;
+				i++;
+			break;
+			
+			case'8': 
+				storeArray[i] = 8;
+				a++;
+				i++;
+			break;
+			
+			case'9':
+				 storeArray[i] = 9;
+				a++;
+				i++;
+			break;
+			
+			case'+':
+				count1 = i;
+				operator = 1;
+				a++;
+			break;
+			
+			case'-':
+				count1 = i;				
+				operator = 2;
+				a++;
+			break;
+			
+			case 'x': 
+				count1 = i;
+				operator = 3;
+				a++;
+			break;
+			
+			case'/': 
+				count1 = i;
+				operator = 4;
+				a++;
+			break;
+			
+			case'=':
+				count2 = i - count1;
+				i = 10;
+			break;
+			
+			default:
+				storeArray[i] = 9;
+		}
+	}
+	i=0;
+	arithmetic(count1, count2, operator, ptr);
+}
+
+void arithmetic(int c1, int c2, int op, int *p){
+volatile	int a = 0;	//first value
+volatile	int b = 0;	//second value
+volatile	int c = 0;	//result
+	
+	switch(c1){	//gets first value
+		case 0: 
+			a = 0;
+		break;
+		
+		case 1:
+			a = *p++;
+		break;
+		
+		case 2:
+			a = *p++ *10;
+			a += *p++;
+			break;
+			
+		default:
+			a = 99;
+	}
+	
+	switch(c2){	//gets second value
+		case 0:
+			b = 0;
+		break;
+		
+		case 1:
+			b = *p++;
+		break;
+		
+		case 2:
+			b = *p++ *10;
+			b += *p++;
+			break;
+			
+		default:
+			b = 99;
+	}
+	
+	switch(op){
+		case 1:
+			c = a + b;
+			break;
+		
+		case 2:
+			c = a - b;
+			break;
+		
+		case 3:
+			c = a * b;
+			break;
+		
+		case 4:
+			c = a / b;
+			break;
+		
+		default:
+			a = 99;
+	}
+	convert(c);
+}
+
+void convert(int t){
+	volatile int a = t;
+	volatile int i = 1000;   //divisor
+	volatile int j = 0;  //array counter
+	volatile int k = 9;
+	volatile int p = 0;
+	//volatile char array1[4] ="0000";
+	//volatile char *arrPtr;
+	arrPtr = array1;
+	volatile int m = 1;  //counter
+	volatile int n = 1000;    //increment to divisor
+
+	while(j <= 3){
+		volatile int b = a % i;
+		if(b == a) {
+			int p = (m-1);
+			switch(p) {
+				case 0:
+				array1[j++] = '0';
+				break;
+				case 1:
+				array1[j++] = '1';
+				break;
+				case 2:
+				array1[j++] = '2';
+				break;
+				case 3:
+				array1[j++] = '3';
+				break;
+				case 4:
+				array1[j++] = '4';
+				break;
+				case 5:
+				array1[j++] = '5';
+				break;
+				case 6:
+				array1[j++] = '6';
+				break;
+				case 7:
+				array1[j++] = '7';
+				break;
+				case 8:
+				array1[j++] = '8';
+				break;
+				case 9:
+				array1[j++] = '9';
+				break;
+				default:
+				array1[j++] = 'G';
+				break;
+			}
+			a = a - (n*(m-1));
+			m = 1;
+
+			if(j == 1){
+				i = 100;
+				n = 100;
+			}
+			if(j == 2){
+				i = 10;
+				n = 10;
+			}
+			if(j == 3){
+				i = 1;
+				n = 1;
+			}
+		}
+		else{
+			m++;
+			i = i + n;
+		}
+	}
+
+	//display(arrPtr);
+	
+	
+}
+void display(char *a){
+	int i = 0;
+	Port *ports = PORT_INSTS;
+	PortGroup *porA = &(ports->Group[0]);
+	PortGroup *porB = &(ports->Group[1]);
+	
+	porA -> DIRSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;//outputs
+	porB -> DIRSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//LED segments
+	//porA->OUTSET.reg = 	PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;
+//
+	//while(i <= 3){
+		//if(i == 0){
+			//porA->OUTCLR.reg = PORT_PA04;
+		//}
+		//if(i == 1){
+			//porA->OUTCLR.reg = PORT_PA04;
+		//}
+		//if(i == 2){
+			//porA->OUTCLR.reg = PORT_PA04;
+		//}
+		//if(i == 3){
+			//porA->OUTCLR.reg = PORT_PA04;
+		//}
+	//
+		switch(*a){
+		
+			case '0':
+			porB -> OUTSET.reg = PORT_PB07 | PORT_PB06;//display "0"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05;//display "0"
+			a++;
+			//i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '1':
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//display "1"
+			porB -> OUTCLR.reg = PORT_PB01 | PORT_PB02;//display "1"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '2':
+			porB -> OUTSET.reg =  PORT_PB02 | PORT_PB05 | PORT_PB07;//display "2"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB03 | PORT_PB04 | PORT_PB06;//display "2"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '3':
+			porB -> OUTSET.reg = PORT_PB04 | PORT_PB05 | PORT_PB07;//display "3"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB06;//display "3"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '4':
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB03 | PORT_PB04 | PORT_PB07;//display "4"
+			porB -> OUTCLR.reg = PORT_PB01 | PORT_PB02 | PORT_PB05 | PORT_PB06;//display "4"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '5':
+			porB -> OUTSET.reg = PORT_PB01 | PORT_PB04 | PORT_PB07;//display "5"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB02 | PORT_PB03 | PORT_PB05 | PORT_PB06;//display "5"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '6':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA02 | PORT_PA03 | PORT_PA04 | PORT_PA05 | PORT_PA06;//display "6"
+			porB -> OUTSET.reg = PORT_PB01 | PORT_PB07;//display "6"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '7':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02;//display "7"
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB04| PORT_PB05 | PORT_PB06 | PORT_PB07;//display "7"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '8':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02 | PORT_PB03 | PORT_PB04| PORT_PB05 | PORT_PB06;//display "8"
+			porB -> OUTSET.reg = PORT_PB07;//display "8"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '9':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02 | PORT_PB05 | PORT_PB06;//display "8"
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB04 | PORT_PB07;//display "8"
+			a++;
+		//	i++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			default:
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB07;//display "A"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB04 | PORT_PB05 | PORT_PB06;//display "A"
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+		}
+}
+
+void wait(volatile int d){
+	int count = 0;
+	while (count < d*1000){
+		count++;
+	}
+}
+
+
+
+
+
+//void EIC_Handler(void){
+//Port *port = PORT;
+//PortGroup *porB = &(port->Group[1]);
+//porB->DIRSET.reg = 1<<2;
+//porB->OUTTGL.reg = PORT_PB02;
+//EIC->INTFLAG.reg = 1<<6;	//clear the int flag
+//
+//}
+
+
+
+//void EICsetup(void){
+////might need to disable EIC first
+//EIC->CTRL.bit.SWRST = 1;	//reset the EIC and disables the EIC
+//while(EIC->STATUS.bit.SYNCBUSY){}	//wait for synchronization
+//EIC->INTENSET.reg = 1<<6;	//enables PA06 for external interrupt
+//EIC->CONFIG[0].bit.SENSE6 = 1;	//select rising edge as triggering ...config[n]..(n*8+x)=y...EXT[y]....SENSEx...n=0|1
+//EIC->CTRL.reg |= 1<<1;	//enable the EIC at the end
+//NVIC->ISER[0] |= 1<<4;	//enable the NVIC handler
+//}
