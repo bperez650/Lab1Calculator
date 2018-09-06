@@ -1,0 +1,777 @@
+
+#include <asf.h>
+
+
+void clockSetup(void);
+void wait(volatile int d);
+void portSetup(void);
+void convert(int t);
+void countKey(char *a);
+void arithmetic(int c1, int c2, int op, int *p);
+void display(char *d);	//displays read #'s on SSDs
+void poll(void);
+void EICsetup(void);
+void Timer4Setup(void);
+void sleep(void);
+void restartTimer(void);
+
+
+volatile char array1[4] ="0000";
+volatile char *arrPtr;
+volatile int slee = 0;
+volatile int tim = 0;
+
+int main (void){
+	
+	system_init();
+ 	clockSetup();
+	portSetup();
+	EICsetup();
+	Timer4Setup();
+	
+		Tc *tc = TC4;
+		TcCount16 *tcc = &tc->COUNT16;
+		tcc->CTRLA.reg |= 1<<1;	//enable the TC4   start timer
+		while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of enable
+			//__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
+	//__WFI();	//go to sleep now
+			poll();
+	
+}
+
+void clockSetup(void){
+//setting up the clock source
+
+	/* Various bits in the INTFLAG register can be set to one at startup.
+		This will ensure that these bits are cleared */
+	SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET | SYSCTRL_INTFLAG_DFLLRDY;
+	SYSCTRL->OSC8M.bit.PRESC = 3;	//divide the clock by 8	so 1MHz still
+	SYSCTRL->OSC8M.bit.ONDEMAND = 1;	//clock is off is no peripheral request
+	SYSCTRL->OSC8M.bit.RUNSTDBY = 1;	//clock is on in sleep mode
+	SYSCTRL->OSC8M.reg |= 1<<1;	//enable clock
+	//SYSCTRL->OSC8M.bit.FRANGE = 2;	//yet another way to control manipulate the clock freq	
+	
+	SYSCTRL->OSC32K.bit.STARTUP = 0;	//start up asap
+	SYSCTRL->OSC32K.bit.ONDEMAND = 1;	//clock is off if no peripheral request
+	SYSCTRL->OSC32K.bit.RUNSTDBY = 1;	//clock is on in sleep mode
+	SYSCTRL->OSC32K.bit.EN32K = 1;	//enable output
+	SYSCTRL->OSC32K.reg |= 1<<1;	//enable clock
+	
+	
+//setting up the clock generator
+
+	GCLK->CTRL.bit.SWRST = 1;	//reset the generators
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for the reset to complete  
+		
+	//this section sets up division for chosen Genclk
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(0) | GCLK_GENDIV_DIV(1);	//divide generator0 by 1
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(1) | GCLK_GENDIV_DIV(1);	//divide generator1 by 1
+
+
+	//this section enables chosen Genclk and configures it
+
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC8M | GCLK_GENCTRL_RUNSTDBY;
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(1) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC32K | GCLK_GENCTRL_RUNSTDBY;
+	
+	//this section chooses what Genclk goes to what peripheral
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for sync to complete  
+	GCLK->CLKCTRL.reg |= 0<<14;	//disable clock
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_EIC | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for EIC...this is a single write method i believe
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_TC4_TC5 | GCLK_CLKCTRL_GEN_GCLK1 | 1<<14;	//setup genclk for TC
+	while (GCLK->STATUS.bit.SYNCBUSY==1){}	//waiting for sync to complete  
+		
+// setting up the CPU and APB and AHB buses clocks
+	PM->CPUSEL.bit.CPUDIV = 0;	//divide CPU clock by 1
+	PM->APBASEL.bit.APBADIV = 0;	//divide apba bus by 64
+	PM->APBBSEL.bit.APBBDIV = 0;	//divide apbb bus by 64 (2^n)
+	PM->APBCSEL.bit.APBCDIV = 0;	//divide apbc bus by 64
+	PM->APBAMASK.reg = PM_APBAMASK_EIC | PM_APBAMASK_GCLK | PM_APBAMASK_PM | PM_APBAMASK_SYSCTRL;	//enable apb's
+	PM->APBCMASK.reg = PM_APBCMASK_TC4;	//enable apb's
+	
+//for sleep
+	PM->SLEEP.reg = PM_SLEEP_IDLE_CPU;	//idle mode selection
+	SCB->SCR = 0<<SCB_SCR_SLEEPDEEP_Pos;	//sets the system controller to idle=0 or standby=1
+}
+
+void Timer4Setup(void){
+	Tc *tc = TC4;
+	TcCount16 *tcc = &tc->COUNT16;
+	tcc->CTRLA.reg = 0;	//disable the TC4
+	while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of disable
+	tcc->CTRLA.bit.PRESCALER = 2;	//divide by 64;
+	tcc->CTRLA.bit.WAVEGEN = 0;	//normal frequency
+	tcc->CTRLA.bit.MODE = 0;	//16 bit mode
+	tcc->CTRLBSET.bit.ONESHOT = 1;	//turn on one shot mode
+	while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync to complete	
+	tcc->INTENSET.bit.OVF = 1;	//enable the overflow interrupt
+	while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync to complete	
+	NVIC->ISER[0] |= 1<<19;	//enable the NVIC handler for TC4
+
+}
+
+void EICsetup(void){
+	//might need to disable EIC first
+	EIC->CTRL.bit.SWRST = 1;	//reset the EIC and disables the EIC
+	while(EIC->STATUS.bit.SYNCBUSY){}	//wait for synchronization
+	EIC->INTENSET.reg = 2<<1;	//enables PA18 for external interrupt (EXT2)
+	EIC->CONFIG[0].bit.SENSE2 = 1;	//select rising edge as triggering ...config[n]..(n*8+x)=y...EXT[y]....SENSEx...n=0|1
+	EIC->WAKEUP.reg = 2<<1;	//allows wakeup
+	EIC->CTRL.reg |= 1<<1;	//enable the EIC at the end
+	while(EIC->STATUS.bit.SYNCBUSY){}	//wait for synchronization
+	NVIC->ISER[0] |= 1<<4;	//enable the NVIC handler
+}
+
+void portSetup(void){
+	Port *por = PORT;
+	PortGroup *porA = &(por->Group[0]);
+	PortGroup *porB = &(por->Group[1]);
+	porA -> DIRSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;//outputs
+	porB -> DIRSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//LED segments
+	porA -> DIRCLR.reg = PORT_PA16 | PORT_PA17 | PORT_PA18 | PORT_PA19;//inputs keypad
+	porA -> PINCFG[16].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[17].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[18].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> OUTCLR.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;
+	
+}
+
+void poll(void){
+	Port *por = PORT;
+	PortGroup *porA = &(por->Group[0]);
+	PortGroup *porB = &(por->Group[1]);
+	
+	volatile int equal=0;//send key
+	volatile int i=0;//counter
+	volatile int x=0; //state (state machine)
+	volatile  int CNT=0;  //counter (state machine)
+	volatile  char T1;	//(state machine)
+	volatile  int N=1;	//delay (state machine)
+	volatile char key='9';//NULL char key (state machine)
+	volatile char array[10];//write array
+	volatile char *keyptr;//write array pointer
+	volatile int counter=0;
+
+	keyptr = array;
+
+	while(1){
+		
+		if(slee){
+			Port *port = PORT;
+			PortGroup *porA = &(port->Group[0]);
+			porA->PMUX[9].bit.PMUXE = 0;	//mux the EIC to pin PA18 (18=2*n)	EXTINT[2]
+			porA->PINCFG[18].bit.PMUXEN =1;	//enable the MUX
+			porA -> OUTCLR.reg = PORT_PA04;//turn on bottom row of keypad
+			porA -> OUTSET.reg = PORT_PA05 | PORT_PA06 | PORT_PA07;//turn off all others
+			__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
+			__WFI();	//go to sleep now
+		}
+		if(tim){
+			Tc *tc = TC4;
+			TcCount16 *tcc = &tc->COUNT16;	
+			tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
+			while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
+		//	while(tcc->STATUS.bit.STOP){}
+			if(!(tcc->STATUS.bit.STOP)){
+				tim = 0;
+				tcc->INTENSET.bit.OVF = 1;	//enable the interrupt
+
+			}
+		}
+		key='#';
+		///////////check first row////////////////
+		porA -> OUTCLR.reg = PORT_PA07;//turn on left SSD/top row of keypad
+		porA -> OUTSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06;//turn off other SSD/top row of keypad
+		display(arrPtr);
+
+		
+		if(porA->IN.reg&PORT_PA19){//checking PA19 for input
+			key='1';
+		}
+		if(porA->IN.reg&PORT_PA18){//checking PA18 for input
+			key='2';
+		}
+		if(porA->IN.reg&PORT_PA17){//checking PA17 for input
+			key='3';
+		}
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'A'
+		{
+			key='+';
+		}
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA07;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+		////////////check second row////////////////
+		porA -> OUTCLR.reg = PORT_PA06;//turn on left SSD/top row of keypad
+		display((arrPtr+1));
+
+
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input
+		key='4';
+		
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input
+		key='5';
+		
+		if(porA->IN.reg&PORT_PA17)//checking PA17 for input
+		key='6';
+		
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'B'
+		{
+			key='-';
+		}
+		
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA06;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+
+		////////////check third row////////////////
+		porA -> OUTCLR.reg = PORT_PA05;//turn on left SSD/top row of keypad
+		display((arrPtr+2));
+
+
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input
+		key='7';
+		
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input
+		key='8';
+		
+		if(porA->IN.reg&PORT_PA17)//checking PA17 for input
+		key='9';
+		
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'C'
+		{
+			key='x';
+		}
+		
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA05;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+
+
+
+		////////////check fourth row////////////////
+		porA -> OUTCLR.reg = PORT_PA04;//turn on left SSD/top row of keypad
+		display((arrPtr+3));
+
+		if(porA->IN.reg&PORT_PA16){//checking PA16 for input 'D'
+				key='/';
+		}
+		if(porA->IN.reg&PORT_PA17){//checking PA17 for input 'D'
+				key='#';
+		}
+		if(porA->IN.reg&PORT_PA18)//checking PA18 for input '0'
+		key='0';
+		
+		if(porA->IN.reg&PORT_PA19)//checking PA19 for input '*'
+		{
+			key= '=';
+			equal = 1;
+		}
+		
+		
+
+	//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA04;//turn off left SSD/top row of keypad
+	//	wait(1);//this wait is so the numbers don't get mixed up
+		
+		switch(x){			
+			case 0:				//state 0 checks for key pressed
+			if(key=='#'){
+			break;}
+			T1=key;
+			CNT=0;
+			x=1;
+			break;
+			
+			case 1:				//state 1 denouncing initial press
+			if(key!=T1){
+				x=0;
+			break;}
+			CNT++;
+			if(CNT>N){	//pressed long enough
+				x=2;
+			break;}
+			break;
+			
+			case 2:				//state 2 process input
+			if(key!='#'){
+				CNT=0;
+				if(key!='a'){
+					array[i++]=key;
+					Tc *tc = TC4;
+					TcCount16 *tcc = &tc->COUNT16;
+					tcc->COUNT.reg = 0;	//reset counter
+					while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync to complete	
+				}
+			}
+			CNT=0;
+			x=3;
+			break;
+			
+			case 3:				//state 3 denouncing release
+			if(key == '#'){
+				CNT++;
+				if(CNT>N){	//released long enough then reset
+					CNT=0;
+					x=0;
+					if (equal){
+						equal=0;
+						i = 0;
+						countKey(keyptr);
+						
+					}
+				}
+				break;
+			}
+			CNT = 0;
+			break;
+			
+			default:
+			x=0;
+			break;
+		}
+	}
+}
+
+void countKey(char *a){	
+	volatile int storeArray[10]; 
+	volatile int *ptr;
+	ptr = storeArray;
+	volatile int i = 0;
+	volatile int operator = 0;
+	volatile int count1 = 0;	//# of digits of first value
+	volatile int count2 = 0;	//# of digits of second value
+	while(i < 10){
+		switch(*a){
+			case'0':
+				 storeArray[i] = 0;
+				a++;
+				i++;
+			break;
+			
+			case'1': 
+				storeArray[i] = 1;
+				a++;
+				i++;
+			break;
+			
+			case'2': 
+				storeArray[i] = 2;
+				a++;
+				i++;
+			break;
+			
+			case'3': 
+				storeArray[i] = 3;
+				a++;
+				i++;
+			break;
+			
+			case'4':
+				 storeArray[i] = 4;
+				a++;
+				i++;
+			break;
+			
+			case'5': 
+				storeArray[i] = 5;
+				a++;
+				i++;
+			break;
+			
+			case'6':
+				 storeArray[i] = 6;
+				a++;
+				i++;
+			break;
+			
+			case'7': 
+				storeArray[i] = 7;
+				a++;
+				i++;
+			break;
+			
+			case'8': 
+				storeArray[i] = 8;
+				a++;
+				i++;
+			break;
+			
+			case'9':
+				 storeArray[i] = 9;
+				a++;
+				i++;
+			break;
+			
+			case'+':
+				count1 = i;
+				operator = 1;
+				a++;
+			break;
+			
+			case'-':
+				count1 = i;				
+				operator = 2;
+				a++;
+			break;
+			
+			case 'x': 
+				count1 = i;
+				operator = 3;
+				a++;
+			break;
+			
+			case'/': 
+				count1 = i;
+				operator = 4;
+				a++;
+			break;
+			
+			case'=':
+				count2 = i - count1;
+				i = 10;
+			break;
+			
+			default:
+				storeArray[i] = 9;
+		}
+	}
+	i=0;
+	arithmetic(count1, count2, operator, ptr);
+}
+
+void arithmetic(int c1, int c2, int op, int *p){
+volatile	int a = 0;	//first value
+volatile	int b = 0;	//second value
+volatile	int c = 0;	//result
+	
+	switch(c1){	//gets first value
+		case 0: 
+			a = 0;
+		break;
+		
+		case 1:
+			a = *p++;
+		break;
+		
+		case 2:
+			a = *p++ *10;
+			a += *p++;
+			break;
+			
+		case 3:
+			a = *p++ *100;
+			a += *p++ *10;
+			a += *p++;
+			break;
+			
+		case 4:
+			a = *p++ *1000;
+			a += *p++ *100;
+			a += *p++ *10;
+			a += *p++;
+			break;
+			
+		default:
+			a = 99;
+	}
+	
+	switch(c2){	//gets second value
+		case 0:
+			b = 0;
+		break;
+		
+		case 1:
+			b = *p++;
+		break;
+		
+		case 2:
+			b = *p++ *10;
+			b += *p++;
+			break;
+			
+		case 3:
+			b = *p++ *100;
+			b += *p++ *10;
+			b += *p++;
+			break;
+			
+		case 4:
+			b = *p++ *1000;
+			b += *p++ *100;
+			b += *p++ *10;
+			b += *p++;
+			break;
+			
+		default:
+			b = 99;
+	}
+	
+	switch(op){
+		case 1:
+			c = a + b;
+			break;
+		
+		case 2:
+			c = a - b;
+			break;
+		
+		case 3:
+			c = a * b;
+			break;
+		
+		case 4:
+			c = a / b;
+			break;
+		
+		default:
+			a = 99;
+	}
+	convert(c);
+}
+
+void convert(int t){
+	volatile int a = t;
+	volatile int i = 1000;   //divisor
+	volatile int j = 0;  //array counter
+	volatile int k = 9;
+	volatile int p = 0;
+	arrPtr = array1;
+	volatile int m = 1;  //counter
+	volatile int n = 1000;    //increment to divisor
+
+	while(j <= 3){
+		volatile int b = a % i;
+		if(b == a) {
+			int p = (m-1);
+			switch(p) {
+				case 0:
+				array1[j++] = '0';
+				break;
+				case 1:
+				array1[j++] = '1';
+				break;
+				case 2:
+				array1[j++] = '2';
+				break;
+				case 3:
+				array1[j++] = '3';
+				break;
+				case 4:
+				array1[j++] = '4';
+				break;
+				case 5:
+				array1[j++] = '5';
+				break;
+				case 6:
+				array1[j++] = '6';
+				break;
+				case 7:
+				array1[j++] = '7';
+				break;
+				case 8:
+				array1[j++] = '8';
+				break;
+				case 9:
+				array1[j++] = '9';
+				break;
+				default:
+				array1[j++] = 'G';
+				break;
+			}
+			a = a - (n*(m-1));
+			m = 1;
+
+			if(j == 1){
+				i = 100;
+				n = 100;
+			}
+			if(j == 2){
+				i = 10;
+				n = 10;
+			}
+			if(j == 3){
+				i = 1;
+				n = 1;
+			}
+		}
+		else{
+			m++;
+			i = i + n;
+		}
+	}		
+}
+
+void display(char *a){
+	int i = 0;
+	Port *ports = PORT_INSTS;
+	PortGroup *porA = &(ports->Group[0]);
+	PortGroup *porB = &(ports->Group[1]);
+	
+	porA -> DIRSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;//outputs
+	porB -> DIRSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//LED segments
+
+		switch(*a){
+		
+			case '0':
+			porB -> OUTSET.reg = PORT_PB07 | PORT_PB06;//display "0"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05;//display "0"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '1':
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//display "1"
+			porB -> OUTCLR.reg = PORT_PB01 | PORT_PB02;//display "1"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '2':
+			porB -> OUTSET.reg =  PORT_PB02 | PORT_PB05 | PORT_PB07;//display "2"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB03 | PORT_PB04 | PORT_PB06;//display "2"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '3':
+			porB -> OUTSET.reg = PORT_PB04 | PORT_PB05 | PORT_PB07;//display "3"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB06;//display "3"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '4':
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB03 | PORT_PB04 | PORT_PB07;//display "4"
+			porB -> OUTCLR.reg = PORT_PB01 | PORT_PB02 | PORT_PB05 | PORT_PB06;//display "4"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '5':
+			porB -> OUTSET.reg = PORT_PB01 | PORT_PB04 | PORT_PB07;//display "5"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB02 | PORT_PB03 | PORT_PB05 | PORT_PB06;//display "5"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '6':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA02 | PORT_PA03 | PORT_PA04 | PORT_PA05 | PORT_PA06;//display "6"
+			porB -> OUTSET.reg = PORT_PB01 | PORT_PB07;//display "6"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '7':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02;//display "7"
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB04| PORT_PB05 | PORT_PB06 | PORT_PB07;//display "7"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '8':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02 | PORT_PB03 | PORT_PB04| PORT_PB05 | PORT_PB06;//display "8"
+			porB -> OUTSET.reg = PORT_PB07;//display "8"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			case '9':
+			porB -> OUTCLR.reg = PORT_PA00 | PORT_PA01 | PORT_PA02 | PORT_PB05 | PORT_PB06;//display "8"
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB04 | PORT_PB07;//display "8"
+			a++;
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+			default:
+			porB -> OUTSET.reg = PORT_PB03 | PORT_PB07;//display "A"
+			porB -> OUTCLR.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB04 | PORT_PB05 | PORT_PB06;//display "A"
+			wait(1);
+			porB -> OUTSET.reg = PORT_PB00 | PORT_PB01 | PORT_PB02 | PORT_PB03 | PORT_PB04 | PORT_PB05 | PORT_PB06 | PORT_PB07;//turn off display
+
+			break;
+		
+		}
+}
+
+void TC4_Handler(void){
+	Tc *tc = TC4;
+	TcCount16 *tcc = &tc->COUNT16;
+	tcc->INTFLAG.bit.OVF = 1;	//clear the interrupt flag
+	tcc->INTENCLR.bit.OVF = 1;	//clear the interrupt
+
+	//Port *port = PORT;
+	//PortGroup *porA = &(port->Group[0]);
+	//porA->PMUX[9].bit.PMUXE = 0;	//mux the EIC to pin PA18 (18=2*n)	EXTINT[2]
+	//porA->PINCFG[18].bit.PMUXEN =1;	//enable the MUX
+	//porA -> OUTCLR.reg = PORT_PA04;//turn on bottom row of keypad
+	//porA -> OUTSET.reg = PORT_PA05 | PORT_PA06 | PORT_PA07;//turn off all others
+	sleep();	//correct way to do it
+	//EIC->CTRL.reg |= 1<<1;	//enable the EIC at the end
+	//EICsetup();
+	//__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
+	//__WFI();	//go to sleep now
+}
+
+void EIC_Handler(void){
+	slee = 0;
+	EIC->INTFLAG.reg = 1<<2;	//clear the int flag
+	Port *port = PORT;
+	PortGroup *porA = &(port->Group[0]);
+	porA->PINCFG[18].bit.PMUXEN =0;	//disable the MUX
+	restartTimer();
+	//Tc *tc = TC4;
+	//TcCount16 *tcc = &tc->COUNT16;	
+	//tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
+	//while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
+	//poll();	//this is horrible never exits
+}
+
+void sleep(void){
+	slee = 1;
+	//__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
+	//__WFI();	//go to sleep now
+}
+
+void wait(volatile int d){
+	int count = 0;
+	while (count < d*1000){
+		count++;
+	}
+}
+
+void restartTimer(void){
+	tim = 1;
+	//Tc *tc = TC4;
+	//TcCount16 *tcc = &tc->COUNT16;	
+	//tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
+	//while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
+}
+
+
