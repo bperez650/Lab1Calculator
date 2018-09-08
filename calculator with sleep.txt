@@ -173,7 +173,6 @@ void poll(void){
 			TcCount16 *tcc = &tc->COUNT16;	
 			tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
 			while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
-		//	while(tcc->STATUS.bit.STOP){}
 			if(!(tcc->STATUS.bit.STOP)){
 				tim = 0;
 				tcc->INTENSET.bit.OVF = 1;	//enable the interrupt
@@ -725,18 +724,8 @@ void TC4_Handler(void){
 	TcCount16 *tcc = &tc->COUNT16;
 	tcc->INTFLAG.bit.OVF = 1;	//clear the interrupt flag
 	tcc->INTENCLR.bit.OVF = 1;	//clear the interrupt
-
-	//Port *port = PORT;
-	//PortGroup *porA = &(port->Group[0]);
-	//porA->PMUX[9].bit.PMUXE = 0;	//mux the EIC to pin PA18 (18=2*n)	EXTINT[2]
-	//porA->PINCFG[18].bit.PMUXEN =1;	//enable the MUX
-	//porA -> OUTCLR.reg = PORT_PA04;//turn on bottom row of keypad
-	//porA -> OUTSET.reg = PORT_PA05 | PORT_PA06 | PORT_PA07;//turn off all others
 	sleep();	//correct way to do it
-	//EIC->CTRL.reg |= 1<<1;	//enable the EIC at the end
-	//EICsetup();
-	//__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
-	//__WFI();	//go to sleep now
+
 }
 
 void EIC_Handler(void){
@@ -746,17 +735,10 @@ void EIC_Handler(void){
 	PortGroup *porA = &(port->Group[0]);
 	porA->PINCFG[18].bit.PMUXEN =0;	//disable the MUX
 	restartTimer();
-	//Tc *tc = TC4;
-	//TcCount16 *tcc = &tc->COUNT16;	
-	//tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
-	//while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
-	//poll();	//this is horrible never exits
 }
 
 void sleep(void){
-	slee = 1;
-	//__DSB();	//The DSB instruction completes when all explicit memory accesses before it complete
-	//__WFI();	//go to sleep now
+	slee = 1;	
 }
 
 void wait(volatile int d){
@@ -768,10 +750,6 @@ void wait(volatile int d){
 
 void restartTimer(void){
 	tim = 1;
-	//Tc *tc = TC4;
-	//TcCount16 *tcc = &tc->COUNT16;	
-	//tcc->CTRLBSET.bit.CMD = 1;	//turn on retrigger
-	//while(tcc->STATUS.bit.SYNCBUSY){}	//wait for sync of retrigger
 }
 
 
